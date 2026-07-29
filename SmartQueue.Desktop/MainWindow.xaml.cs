@@ -1,70 +1,166 @@
 using System;
+usingSystem.Threading.Tasks;
 using System.Windows;
+using System.Windows.Media;
 using Microsoft.AspNetCore.SignalR.Client;
 
 namespace SmartQueue.Desktop
 {
     public partial class MainWindow : Window
     {
-        private HubConnection _hubConnection;
+        private readonly HubConnection _hubConnection;
 
         public MainWindow()
         {
             InitializeComponent();
 
-            // Initialisation professionnelle de SignalR Client
             _hubConnection = new HubConnectionBuilder()
-                .WithUrl("http://localhost:5000/queueHub")
+                .WithUrl("https://localhost:5001/queueHub") // Adapter l'URL à votre serveur
                 .WithAutomaticReconnect()
                 .Build();
 
-            // Gestion de la réception asynchrone des événements en temps réel
+            // Réception des appels de tickets
             _hubConnection.On<string, string>("ReceiveTicketUpdate", (ticketNumber, counterName) =>
             {
                 Dispatcher.Invoke(() =>
                 {
                     LblCurrentCall.Text = $"📢 TICKET {ticketNumber} AU {counterName.ToUpper()}";
-                    LstHistory.Items.Insert(0, $"[{DateTime.Now.ToString("HH:mm:ss")}] Ticket {ticketNumber} appelé au {counterName}");
+
+                    LstHistory.Items.Insert(
+                        0,
+                        $"[{DateTime.Now:HH:mm:ss}] Ticket {ticketNumber} appelé au {counterName}"
+                    );
                 });
             });
 
+            // Gestion de la reconnexion
+            _hubConnection.Reconnecting += error =>
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    TxtStatus.Text = "Reconnexion en cours...";
+                    TxtStatus.Foreground = Brushes.Orange;
+                });
+
+                return Task.CompletedTask;
+            };
+
+            _hubConnection.Reconnected += connectionId =>
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    TxtStatus.Text = "Connecté";
+                    TxtStatus.Foreground = Brushes.Green;
+                });
+
+                return Task.CompletedTask;
+            };
+
+            _hubConnection.Closed += async error =>
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    TxtStatus.Text = "Connexion perdue";
+                    TxtStatus.Foreground = Brushes.Red;
+                });
+
+                await Task.Delay(5000);
+
+                try
+                {
+                    await _hubConnection.StartAsync();
+                }
+                catch
+                {
+                    // Journaliser l'erreur si nécessaire
+                }
+            };
+
             Loaded += MainWindow_Loaded;
+            Closing += MainWindow_Closing;
         }
 
         private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
+            await ConnectAsync();
+        }
+
+        private async Task ConnectAsync()
+        {
             try
             {
                 await _hubConnection.StartAsync();
-                TxtStatus.Text = "Connecté au serveur ASP.NET Core (SignalR actif)";
-                TxtStatus.Foreground = System.Windows.Media.Brushes.Green;
+
+                TxtStatus.Text = "Connecté au serveur ASP.NET Core";
+                TxtStatus.Foreground = Brushes.Green;
             }
             catch (Exception ex)
             {
-                TxtStatus.Text = $"Erreur de connexion : {ex.Message}";
-                TxtStatus.Foreground = System.Windows.Media.Brushes.Red;
+                TxtStatus.Text = $"Erreur : {ex.Message}";
+                TxtStatus.Foreground = Brushes.Red;
             }
         }
 
         private async void BtnCallNext_Click(object sender, RoutedEventArgs e)
         {
-            if (_hubConnection.State == HubConnectionState.Connected)
+            if (string.IsNullOrWhiteSpace(TxtTicketNumber.Text) ||
+                string.IsNullOrWhiteSpace(TxtCounter.Text))
             {
-                string currentTicket = TxtTicketNumber.Text;
-                string counter = TxtCounter.Text;
+                MessageBox.Show(
+                    "Veuillez saisir le numéro du ticket et le guichet.",
+                    "Validation",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
 
-                // Invocation du hub distant
-                await _hubConnection.InvokeAsync("CallNextTicket", currentTicket, counter);
+                return;
+            }
 
-                // Auto-incrémentation intelligente pour l'agent
-                if (currentTicket.Contains("-") && int.TryParse(currentTicket.Split('-')[1], out int num))
+            if (_hubConnection.State != HubConnectionState.Connected)
+            {
+                MessageBox.Show(
+                    "Le serveur n'est pas connecté.",
+                    "Erreur",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+
+                return;
+            }
+
+            try
+            {
+                string currentTicket = TxtTicketNumber.Text.Trim();
+                string counter = TxtCounter.Text.Trim();
+
+                await _hubConnection.InvokeAsync(
+                    "CallNextTicket",
+                    currentTicket,
+                    counter);
+
+                // Auto-incrémentation du ticket
+                var parts = currentTicket.Split('-');
+
+                if (parts.Length == 2 &&
+                    int.TryParse(parts[1], out int number))
                 {
-                    TxtTicketNumber.Text = $"{currentTicket.Split('-')[0]}-{num + 1}";
+                    TxtTicketNumber.Text = $"{parts[0]}-{number + 1:D3}";
                 }
             }
-            else
+            catch (Exception ex)
             {
-                MessageBox.Show("Impossible d'appeler le ticket. Le serveur n'est pas accessible.", "Erreur de Connexion", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show(
+                    ex.Message,
+                    "Erreur",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
+        }
+
+        private async void MainWindow_Closing(object sender, System.ComponentModel.CancelEventArgs e)
+        {
+            if (_hubConnection != null)
+            {
+                await _hubConnection.StopAsync();
+                await _hubConnection.DisposeAsync();
             }
         }
     }
